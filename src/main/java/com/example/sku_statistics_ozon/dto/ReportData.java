@@ -1,5 +1,7 @@
-package com.example.sku_statistics_ozon.model;
+package com.example.sku_statistics_ozon.dto;
 
+import com.example.sku_statistics_ozon.model.ReportRow;
+import com.example.sku_statistics_ozon.model.ReportTotals;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 

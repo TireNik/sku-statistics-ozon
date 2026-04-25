@@ -1,6 +1,8 @@
 package com.example.sku_statistics_ozon.service;
 
-import com.example.sku_statistics_ozon.model.*;
+import com.example.sku_statistics_ozon.dto.FinalReportRow;
+import com.example.sku_statistics_ozon.dto.ReportDetailResponse;
+import com.example.sku_statistics_ozon.dto.ReportRequest;
 import com.opencsv.CSVWriter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

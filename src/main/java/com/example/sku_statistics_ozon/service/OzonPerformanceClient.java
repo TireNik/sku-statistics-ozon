@@ -1,5 +1,9 @@
 package com.example.sku_statistics_ozon.service;
 
+import com.example.sku_statistics_ozon.dto.CampaignProductStatsResponse;
+import com.example.sku_statistics_ozon.dto.CreateReportRequest;
+import com.example.sku_statistics_ozon.dto.CreateReportResponse;
+import com.example.sku_statistics_ozon.dto.ReportDetailResponse;
 import com.example.sku_statistics_ozon.model.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

@@ -1,4 +1,4 @@
-package com.example.sku_statistics_ozon.model;
+package com.example.sku_statistics_ozon.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;

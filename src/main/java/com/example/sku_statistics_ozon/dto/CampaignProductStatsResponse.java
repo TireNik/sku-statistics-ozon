@@ -1,5 +1,6 @@
-package com.example.sku_statistics_ozon.model;
+package com.example.sku_statistics_ozon.dto;
 
+import com.example.sku_statistics_ozon.model.CampaignProductStat;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
