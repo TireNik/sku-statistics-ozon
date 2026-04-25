@@ -1,0 +1,4 @@
+spring:
+  application:
+    name: sku-statistics-ozon
+
