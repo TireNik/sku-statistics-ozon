@@ -1,163 +1,217 @@
 package com.example.sku_statistics_ozon.service;
 
-import com.example.sku_statistics_ozon.dto.CampaignProductStatsResponse;
-import com.example.sku_statistics_ozon.dto.CreateReportRequest;
-import com.example.sku_statistics_ozon.dto.CreateReportResponse;
-import com.example.sku_statistics_ozon.dto.ReportDetailResponse;
-import com.example.sku_statistics_ozon.model.*;
+import com.example.sku_statistics_ozon.dto.DateRangeRequest;
+import com.example.sku_statistics_ozon.dto.OzonRowsResponse;
+import com.example.sku_statistics_ozon.model.CampaignClickStat;
+import com.example.sku_statistics_ozon.model.CampaignExpenseStat;
+import com.example.sku_statistics_ozon.model.OrderReportItem;
+import com.example.sku_statistics_ozon.model.ProductReportItem;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.*;
-import org.springframework.stereotype.Component;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpHeaders;
+import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.client.RestClient;
 
 import java.util.List;
-import java.util.Optional;
 
-@Component
-@RequiredArgsConstructor
 @Slf4j
+@Service
+@RequiredArgsConstructor
 public class OzonPerformanceClient {
 
-    private final RestTemplate restTemplate;
-    private static final String BASE_URL = "https://api-performance.ozon.ru:443";
+    private final RestClient ozonRestClient;
+    private final ObjectMapper objectMapper;
 
-    public List<String> getActiveCampaignIds(String token, String from, String to) {
+    private static final int    POLL_INTERVAL_SEC   = 10;
+    private static final int    POLL_MAX_ATTEMPTS   = 30;
 
-        ResponseEntity<CampaignProductStatsResponse> response =
-                restTemplate.exchange(
-                        buildUrl(from, to),
-                        HttpMethod.GET,
-                        new HttpEntity<>(createHeaders(token)),
-                        CampaignProductStatsResponse.class
-                );
-
-        List<CampaignProductStat> rows = Optional.ofNullable(response.getBody())
-                .map(CampaignProductStatsResponse::getRows)
-                .orElse(List.of());
-
-        log.info("Total products: {}", rows.size());
-
-        return rows.stream()
-                .filter(CampaignProductStat::isActive)
-                .filter(CampaignProductStat::hasSpent)
-                .map(CampaignProductStat::getId)
-                .distinct()
-                .toList();
+    public List<CampaignClickStat> getCampaignProductStats(
+            String dateFrom, String dateTo, String token) {
+        log.info("Запрос статистики кампаний: {} - {}", dateFrom, dateTo);
+        OzonRowsResponse<CampaignClickStat> response = ozonRestClient.get()
+                .uri(u -> u.path("/api/client/statistics/campaign/product/json")
+                        .queryParam("dateFrom", dateFrom)
+                        .queryParam("dateTo", dateTo)
+                        .build())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return response != null ? response.getRows() : List.of();
     }
 
-    public String createReportWithRetry(String token, List<String> ids,
-                                        String from, String to) {
+    public List<CampaignExpenseStat> getDailyStats(
+            String dateFrom, String dateTo, String token) {
+        log.info("Запрос дневной статистики: {} - {}", dateFrom, dateTo);
+        OzonRowsResponse<CampaignExpenseStat> response = ozonRestClient.get()
+                .uri(u -> u.path("/api/client/statistics/daily/json")
+                        .queryParam("dateFrom", dateFrom)
+                        .queryParam("dateTo", dateTo)
+                        .build())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .retrieve()
+                .body(new ParameterizedTypeReference<>() {});
+        return response != null ? response.getRows() : List.of();
+    }
 
-        log.info("id first {}, and size {}", ids.get(0), ids.size());
+    public List<OrderReportItem> getOrderReport(
+            String from, String to, String token) {
+        log.info("Запрос отчёта по заказам: {} - {}", from, to);
+        String uuid = requestReportGeneration(
+                "/api/client/statistic/orders/generate/json", from, to, token);
+        String rawJson = pollUntilReady(uuid, token);
+        return parseRows(rawJson, OrderReportItem.class);
+    }
 
-        for (int i = 0; i < 5; i++) {
+    public List<ProductReportItem> getProductReport(
+            String from, String to, String token) {
+        log.info("Запрос отчёта по товарам: {} - {}", from, to);
+        String uuid = requestReportGeneration(
+                "/api/client/statistic/products/generate/json", from, to, token);
+        String rawJson = pollUntilReady(uuid, token);
+        return parseRows(rawJson, ProductReportItem.class);
+    }
+
+    private String requestReportGeneration(
+            String uri, String from, String to, String token) {
+        String raw = ozonRestClient.post()
+                .uri(uri)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                .body(new DateRangeRequest(from, to))
+                .retrieve()
+                .body(String.class);
+
+        log.info("Ответ генерации отчёта [{}]: {}", uri, raw);
+
+        try {
+            JsonNode node = objectMapper.readTree(raw);
+            String uuid = node.path("UUID").asText(null);
+            if (uuid == null || uuid.isBlank()) {
+                throw new RuntimeException("UUID не получен. Ответ: " + raw);
+            }
+            log.info("Получен UUID: {}", uuid);
+            return uuid;
+        } catch (Exception e) {
+            throw new RuntimeException("Ошибка парсинга UUID: " + e.getMessage(), e);
+        }
+    }
+
+    private String pollUntilReady(String uuid, String token) {
+        log.info("Ожидание начала формирования отчёта UUID={} (5с)...", uuid);
+        sleep(5);
+
+        for (int attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
+            log.info("Проверка готовности UUID={}, попытка {}/{}", uuid, attempt, POLL_MAX_ATTEMPTS);
+
+            String raw;
             try {
-                ResponseEntity<CreateReportResponse> response =
-                        restTemplate.exchange(
-                                BASE_URL + "/api/client/statistics/json",
-                                HttpMethod.POST,
-                                new HttpEntity<>(
-                                        CreateReportRequest.builder()
-                                                .campaigns(ids)
-                                                .dateFrom(from)
-                                                .dateTo(to)
-                                                .build(),
-                                        createHeaders(token)
-                                ),
-                                CreateReportResponse.class
-                        );
-
-                log.info("Status {}", response.getStatusCode());
-                log.info("Created report {}", response.getBody().toString());
-
-                return Optional.ofNullable(response.getBody())
-                        .map(CreateReportResponse::getUuid)
-                        .orElseThrow(() -> new RuntimeException("Empty response"));
-
+                raw = ozonRestClient.get()
+                        .uri(u -> u.path("/api/client/statistics/report")
+                                .queryParam("UUID", uuid)
+                                .build())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .retrieve()
+                        .body(String.class);
             } catch (HttpClientErrorException e) {
-
-                String body = e.getResponseBodyAsString();
-
-                log.info("ErrorBody {}", body);
-
-                if (body.contains("Maximum 1")) {
-                    sleep(5000);
+                if (e.getStatusCode().value() == 404) {
+                    log.info("Отчёт ещё не найден (404), ждём {}с... UUID={}",
+                            POLL_INTERVAL_SEC, uuid);
+                    sleep(POLL_INTERVAL_SEC);
                     continue;
                 }
-
-                throw e;
+                throw new RuntimeException("Ошибка запроса отчёта: " + e.getMessage(), e);
             }
-        }
 
-        throw new RuntimeException("Failed to create report after retry");
-    }
+            log.info("Ответ поллинга UUID={}: {}", uuid,
+                    raw != null ? raw.substring(0, Math.min(500, raw.length())) : "NULL");
 
-    public ReportDetailResponse waitReport(String token, String uuid) {
-
-        int maxAttempts = 15;
-        long delay = 10000;
-
-        for (int i = 0; i < maxAttempts; i++) {
-
-            sleep(delay);
-
-            log.info("Polling report UUID={}, attempt {}/{}", uuid, i + 1, maxAttempts);
+            if (raw == null || raw.isBlank()) {
+                sleep(POLL_INTERVAL_SEC);
+                continue;
+            }
 
             try {
-                ResponseEntity<ReportDetailResponse> response =
-                        restTemplate.exchange(
-                                BASE_URL + "/api/client/statistics/report?UUID=" + uuid,
-                                HttpMethod.GET,
-                                new HttpEntity<>(createHeaders(token)),
-                                ReportDetailResponse.class
-                        );
+                JsonNode node = objectMapper.readTree(raw);
 
-                ReportDetailResponse body = response.getBody();
-
-                if (body != null && !body.isEmpty()) {
-                    log.info("Report ready: UUID={}, campaigns={}", uuid, body.size());
-                    return body;
+                if (node.has("rows")) {
+                    log.info("Отчёт готов (есть rows), UUID={}", uuid);
+                    return raw;
                 }
 
-                log.info("Report not ready yet (empty map)");
+                String state = node.path("state").asText(
+                        node.path("status").asText(""));
 
-                delay += 5000;
+                log.info("Статус отчёта: '{}', UUID={}", state, uuid);
 
-            } catch (HttpClientErrorException.NotFound e) {
-                log.info("Report not found yet (UUID={})", uuid);
-            } catch (HttpClientErrorException e) {
-                log.error("Client error: {}", e.getResponseBodyAsString());
+                switch (state.toUpperCase()) {
+                    case "OK", "DONE", "COMPLETED", "SUCCESS", "FINISH" -> {
+                        log.info("Отчёт готов по статусу, UUID={}", uuid);
+                        return raw;
+                    }
+                    case "ERROR", "FAILED" -> throw new RuntimeException(
+                            "Ошибка генерации отчёта UUID=" + uuid +
+                                    ", ответ: " + raw);
+                    default -> {
+                        log.info("Отчёт формируется (state='{}'), ждём {}с...",
+                                state, POLL_INTERVAL_SEC);
+                        sleep(POLL_INTERVAL_SEC);
+                    }
+                }
+            } catch (RuntimeException e) {
                 throw e;
+            } catch (Exception e) {
+                throw new RuntimeException("Ошибка парсинга ответа UUID=" + uuid, e);
             }
         }
 
-        throw new RuntimeException("Отчет не готов после " + maxAttempts + " попыток");
+        throw new RuntimeException(
+                "Таймаут ожидания отчёта (" + (POLL_MAX_ATTEMPTS * POLL_INTERVAL_SEC) +
+                        "с). UUID=" + uuid);
     }
 
-    private String buildUrl(String from, String to) {
-        return UriComponentsBuilder.fromHttpUrl(BASE_URL)
-                .path("/api/client/statistics/campaign/product/json")
-                .queryParam("dateFrom", from)
-                .queryParam("dateTo", to)
-                .toUriString();
-    }
-
-    private HttpHeaders createHeaders(String token) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("Authorization", token.startsWith("Bearer ") ? token : "Bearer " + token);
-        return headers;
-    }
-
-    private void sleep(long ms) {
+    private <T> List<T> parseRows(String raw, Class<T> itemClass) {
+        if (raw == null || raw.isBlank()) return List.of();
         try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
+            JsonNode root = objectMapper.readTree(raw);
+            JsonNode rowsNode = root.path("rows");
+
+            if (!rowsNode.isMissingNode() && rowsNode.isArray()) {
+                List<T> result = objectMapper.convertValue(
+                        rowsNode,
+                        objectMapper.getTypeFactory()
+                                .constructCollectionType(List.class, itemClass));
+                log.info("Распарсено записей [{}]: {}", itemClass.getSimpleName(), result.size());
+                return result;
+            }
+
+            if (root.isArray()) {
+                List<T> result = objectMapper.convertValue(
+                        root,
+                        objectMapper.getTypeFactory()
+                                .constructCollectionType(List.class, itemClass));
+                log.info("Распарсено записей (массив) [{}]: {}", itemClass.getSimpleName(), result.size());
+                return result;
+            }
+
+            log.warn("Неожиданная структура ответа: {}", raw.substring(0, Math.min(200, raw.length())));
+            return List.of();
+
+        } catch (Exception e) {
+            log.error("Ошибка парсинга ответа [{}]: {}", itemClass.getSimpleName(), e.getMessage(), e);
+            return List.of();
         }
     }
+
+    private void sleep(int seconds) {
+        try {
+            Thread.sleep(seconds * 1000L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Прерывание во время ожидания отчёта", e);
+        }
+    }
+
 }
