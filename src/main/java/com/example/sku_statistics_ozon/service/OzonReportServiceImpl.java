@@ -57,6 +57,13 @@ public class OzonReportServiceImpl implements OzonReportService {
 
         log.info("Справочник из ProductReport: {} товаров", offerIdToSkuFromProducts.size());
 
+        Set<String> knownOfferIds = allProducts.stream()
+                .map(ProductReportItem::getOfferId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
+        log.info("Известных offerId из ProductReport: {}", knownOfferIds.size());
+
         Map<String, OrderReportItem> offerIdToFirstOrder = new LinkedHashMap<>();
         Map<String, BigDecimal> offerIdToTotalMoneySpent = new LinkedHashMap<>();
         Map<String, BigDecimal> offerIdToCpoCost = new LinkedHashMap<>();
