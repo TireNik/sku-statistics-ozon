@@ -39,11 +39,13 @@ public class OzonReportServiceImpl implements OzonReportService {
         log.info("Кампаний: {}, заказов: {}, товаров: {}",
                 allCampaigns.size(), allOrders.size(), allProducts.size());
 
-        // ============================================================
-        // Справочник из ProductReportItem: offerId -> SKU и title
-        // ProductReportItem содержит точную связь OfferID <-> SKU
-        // ============================================================
-        // offerId -> SKU (из отчёта по товарам — самый надёжный источник)
+        Set<String> knownOfferIds = allProducts.stream()
+                .map(ProductReportItem::getOfferId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
+        log.info("Известных offerId из ProductReport: {}", knownOfferIds.size());
+
         Map<String, String> offerIdToSkuFromProducts = allProducts.stream()
                 .filter(p -> p.getOfferId() != null && p.getSku() != null)
                 .collect(Collectors.toMap(
@@ -52,7 +54,6 @@ public class OzonReportServiceImpl implements OzonReportService {
                         (a, b) -> a
                 ));
 
-        // offerId -> title (из отчёта по товарам)
         Map<String, String> offerIdToTitleFromProducts = allProducts.stream()
                 .filter(p -> p.getOfferId() != null && p.getTitle() != null)
                 .collect(Collectors.toMap(
@@ -63,20 +64,9 @@ public class OzonReportServiceImpl implements OzonReportService {
 
         log.info("Справочник из ProductReport: {} товаров", offerIdToSkuFromProducts.size());
 
-        // ============================================================
-        // Из OrderReportItem:
-        // - offerId -> advSku (для обогащения, но менее надёжен чем ProductReport)
-        // - offerId -> title (название из заказа)
-        // - offerId -> суммарный moneySpent (расходы)
-        // - offerId -> ID CPO кампании (из ordersSource если есть)
-        // ============================================================
-        // offerId -> первый заказ (для мета-данных)
         Map<String, OrderReportItem> offerIdToFirstOrder = new LinkedHashMap<>();
-        // offerId -> суммарный moneySpent по ВСЕМ заказам
         Map<String, BigDecimal> offerIdToTotalMoneySpent = new LinkedHashMap<>();
-        // offerId -> суммарный cost только CPO заказов
         Map<String, BigDecimal> offerIdToCpoCost = new LinkedHashMap<>();
-        // offerId -> кол-во CPO заказов
         Map<String, Integer> offerIdToCpoOrderCount = new LinkedHashMap<>();
 
         for (OrderReportItem order : allOrders) {
@@ -96,9 +86,6 @@ public class OzonReportServiceImpl implements OzonReportService {
             }
         }
 
-        // ============================================================
-        // Running кампании -> CPC строки
-        // ============================================================
         List<CampaignClickStat> runningCampaigns = allCampaigns.stream()
                 .filter(c -> STATUS_RUNNING.equalsIgnoreCase(c.getStatus()))
                 .toList();
@@ -110,7 +97,6 @@ public class OzonReportServiceImpl implements OzonReportService {
         for (CampaignClickStat campaign : runningCampaigns) {
             String offerId = extractOfferId(campaign.getTitle());
 
-            // SKU: приоритет ProductReport (точнее), потом OrderReport
             String sku = offerId != null
                     ? offerIdToSkuFromProducts.getOrDefault(
                     offerId,
@@ -119,7 +105,6 @@ public class OzonReportServiceImpl implements OzonReportService {
                             : null)
                     : null;
 
-            // Title: приоритет ProductReport, потом OrderReport, потом название кампании
             String title = offerId != null
                     ? offerIdToTitleFromProducts.getOrDefault(
                     offerId,
@@ -161,12 +146,6 @@ public class OzonReportServiceImpl implements OzonReportService {
             }
         }
 
-        // ============================================================
-        // CPO строки — из заказов где source содержит "Оплата за заказ"
-        // Группируем по offerId
-        // ============================================================
-
-        // Собираем уникальные offerId с CPO заказами
         Set<String> cpoOfferIds = offerIdToCpoOrderCount.keySet();
 
         log.info("CPO товаров (уникальных offerId): {}", cpoOfferIds.size());
@@ -174,7 +153,6 @@ public class OzonReportServiceImpl implements OzonReportService {
         List<EnrichedCampaignRow> cpoRows = new ArrayList<>();
 
         for (String offerId : cpoOfferIds) {
-            // SKU и title — строго из ProductReport по offerId
             String sku = offerIdToSkuFromProducts.get(offerId);
             String title = offerIdToTitleFromProducts.getOrDefault(
                     offerId,
@@ -182,8 +160,6 @@ public class OzonReportServiceImpl implements OzonReportService {
                             ? offerIdToFirstOrder.get(offerId).getTitle()
                             : offerId);
 
-            // Расход CPO = сумма moneySpent ТОЛЬКО CPO заказов данного offerId
-            // (не смешиваем с CPC расходами)
             BigDecimal cpoCost     = offerIdToCpoCost.getOrDefault(offerId, BigDecimal.ZERO);
             BigDecimal cpoMoneySpent = allOrders.stream()
                     .filter(o -> offerId.equals(o.getOfferId())
@@ -196,7 +172,7 @@ public class OzonReportServiceImpl implements OzonReportService {
             int ordersCount = offerIdToCpoOrderCount.getOrDefault(offerId, 0);
 
             cpoRows.add(EnrichedCampaignRow.builder()
-                    .campaignId("-")        // ID CPO кампании нет в данных заказов
+                    .campaignId("-")
                     .campaignTitle("-")
                     .objectType("-")
                     .status("-")
@@ -224,9 +200,6 @@ public class OzonReportServiceImpl implements OzonReportService {
             }
         }
 
-        // ============================================================
-        // Объединяем
-        // ============================================================
         List<EnrichedCampaignRow> result = new ArrayList<>();
         result.addAll(cpcRows);
         result.addAll(cpoRows);
@@ -237,6 +210,7 @@ public class OzonReportServiceImpl implements OzonReportService {
 
         return result;
     }
+
 
     private String extractOfferId(String campaignTitle) {
         if (campaignTitle == null || campaignTitle.isBlank()) return null;
