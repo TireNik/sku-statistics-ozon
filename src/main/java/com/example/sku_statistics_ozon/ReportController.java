@@ -9,6 +9,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @RestController
@@ -46,6 +47,32 @@ public class ReportController {
         byte[] csv = csvExportService.exportToCsv(rows);
 
         String filename = "ozon_orders_" + dateFrom + "_" + dateTo + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + filename)
+                .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
+                .body(csv);
+    }
+
+    @GetMapping(value = "/full/csv", produces = "text/csv")
+    public ResponseEntity<byte[]> getFullCsv(
+            @RequestParam String dateFrom,
+            @RequestParam String dateTo,
+            @RequestHeader("X-Ozon-Token") String token
+    ) {
+
+        List<EnrichedCampaignRow> campaignRows =
+                reportService.buildReport(dateFrom, dateTo, token);
+
+        List<EnrichedCampaignRow> orderRows =
+                reportService.buildOrderReport(dateFrom, dateTo, token);
+
+        List<EnrichedCampaignRow> merged = new ArrayList<>(campaignRows);
+        merged.addAll(orderRows);
+
+        byte[] csv = csvExportService.exportToCsv(merged);
+
+        String filename = "ozon_full_" + dateFrom + "_" + dateTo + ".csv";
+
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + filename)
                 .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
