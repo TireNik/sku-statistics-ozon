@@ -39,13 +39,6 @@ public class OzonReportServiceImpl implements OzonReportService {
         log.info("Кампаний: {}, заказов: {}, товаров: {}",
                 allCampaigns.size(), allOrders.size(), allProducts.size());
 
-        Set<String> knownOfferIds = allProducts.stream()
-                .map(ProductReportItem::getOfferId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-
-        log.info("Известных offerId из ProductReport: {}", knownOfferIds.size());
-
         Map<String, String> offerIdToSkuFromProducts = allProducts.stream()
                 .filter(p -> p.getOfferId() != null && p.getSku() != null)
                 .collect(Collectors.toMap(
