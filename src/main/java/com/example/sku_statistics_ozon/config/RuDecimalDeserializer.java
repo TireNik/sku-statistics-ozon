@@ -21,8 +21,12 @@ public class RuDecimalDeserializer extends StdDeserializer<BigDecimal> {
             DeserializationContext deserializationContext
     ) throws IOException, JacksonException {
         String value = jsonParser.getText();
-        if (value == null || value.isBlank()) return null;
+        if (value == null || value.isBlank() || value.equals("-")) return null;
 
-        return new BigDecimal(value.replace(",", "."));
+        try {
+            return new BigDecimal(value.replace(",", "."));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

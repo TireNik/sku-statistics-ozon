@@ -3,6 +3,7 @@ package com.example.sku_statistics_ozon.service;
 import com.example.sku_statistics_ozon.dto.EnrichedCampaignRow;
 import com.example.sku_statistics_ozon.model.CampaignClickStat;
 import com.example.sku_statistics_ozon.model.OrderReportItem;
+import com.example.sku_statistics_ozon.model.ProductReportItem;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -26,58 +27,111 @@ public class OzonReportServiceImpl implements OzonReportService {
     private static final String SOURCE_CPO = "Оплата за заказ";
 
     @Override
-    public List<EnrichedCampaignRow> buildReport(
-            String dateFrom, String dateTo, String token) {
+    public List<EnrichedCampaignRow> buildReport(String dateFrom, String dateTo, String token) {
 
         String postFrom = dateFrom + "T00:00:00Z";
-        String postTo = dateTo + "T00:00:00Z";
+        String postTo   = dateTo   + "T23:59:59Z";
 
         List<CampaignClickStat> allCampaigns = client.getCampaignProductStats(dateFrom, dateTo, token);
-        List<OrderReportItem> allOrders = client.getOrderReport(postFrom, postTo, token);
+        List<OrderReportItem>   allOrders    = client.getOrderReport(postFrom, postTo, token);
+        List<ProductReportItem> allProducts  = client.getProductReport(postFrom, postTo, token);
 
-        log.info("Кампаний всего: {}, заказов всего: {}", allCampaigns.size(), allOrders.size());
+        log.info("Кампаний: {}, заказов: {}, товаров: {}",
+                allCampaigns.size(), allOrders.size(), allProducts.size());
 
+        // ============================================================
+        // Справочник из ProductReportItem: offerId -> SKU и title
+        // ProductReportItem содержит точную связь OfferID <-> SKU
+        // ============================================================
+        // offerId -> SKU (из отчёта по товарам — самый надёжный источник)
+        Map<String, String> offerIdToSkuFromProducts = allProducts.stream()
+                .filter(p -> p.getOfferId() != null && p.getSku() != null)
+                .collect(Collectors.toMap(
+                        ProductReportItem::getOfferId,
+                        ProductReportItem::getSku,
+                        (a, b) -> a
+                ));
+
+        // offerId -> title (из отчёта по товарам)
+        Map<String, String> offerIdToTitleFromProducts = allProducts.stream()
+                .filter(p -> p.getOfferId() != null && p.getTitle() != null)
+                .collect(Collectors.toMap(
+                        ProductReportItem::getOfferId,
+                        ProductReportItem::getTitle,
+                        (a, b) -> a
+                ));
+
+        log.info("Справочник из ProductReport: {} товаров", offerIdToSkuFromProducts.size());
+
+        // ============================================================
+        // Из OrderReportItem:
+        // - offerId -> advSku (для обогащения, но менее надёжен чем ProductReport)
+        // - offerId -> title (название из заказа)
+        // - offerId -> суммарный moneySpent (расходы)
+        // - offerId -> ID CPO кампании (из ordersSource если есть)
+        // ============================================================
+        // offerId -> первый заказ (для мета-данных)
+        Map<String, OrderReportItem> offerIdToFirstOrder = new LinkedHashMap<>();
+        // offerId -> суммарный moneySpent по ВСЕМ заказам
+        Map<String, BigDecimal> offerIdToTotalMoneySpent = new LinkedHashMap<>();
+        // offerId -> суммарный cost только CPO заказов
+        Map<String, BigDecimal> offerIdToCpoCost = new LinkedHashMap<>();
+        // offerId -> кол-во CPO заказов
+        Map<String, Integer> offerIdToCpoOrderCount = new LinkedHashMap<>();
+
+        for (OrderReportItem order : allOrders) {
+            String offerId = order.getOfferId();
+            if (offerId == null) continue;
+
+            offerIdToFirstOrder.putIfAbsent(offerId, order);
+            offerIdToTotalMoneySpent.merge(offerId, nvl(order.getMoneySpent()), BigDecimal::add);
+
+            boolean isCpo = order.getOrdersSource() != null
+                    && order.getOrdersSource().contains(SOURCE_CPO)
+                    && !order.getOrdersSource().contains(SOURCE_CPC);
+
+            if (isCpo) {
+                offerIdToCpoCost.merge(offerId, nvl(order.getCost()), BigDecimal::add);
+                offerIdToCpoOrderCount.merge(offerId, 1, Integer::sum);
+            }
+        }
+
+        // ============================================================
+        // Running кампании -> CPC строки
+        // ============================================================
         List<CampaignClickStat> runningCampaigns = allCampaigns.stream()
                 .filter(c -> STATUS_RUNNING.equalsIgnoreCase(c.getStatus()))
                 .toList();
 
         log.info("Running кампаний: {}", runningCampaigns.size());
 
-        Map<String, OrderReportItem> offerIdToMeta = new LinkedHashMap<>();
-        Map<String, BigDecimal> offerIdToMoneySpent = new LinkedHashMap<>();
-
-        for (OrderReportItem order : allOrders) {
-            String offerId = order.getOfferId();
-            if (offerId == null) continue;
-
-            offerIdToMeta.putIfAbsent(offerId, order);
-
-            offerIdToMoneySpent.merge(
-                    offerId,
-                    nvl(order.getMoneySpent()),
-                    BigDecimal::add
-            );
-        }
-
-        log.info("Уникальных offerId в заказах: {}", offerIdToMeta.size());
-        offerIdToMeta.forEach((k, v) ->
-                log.debug("offerId={} -> advSku={} moneySpent={}",
-                        k, v.getAdvSku(), offerIdToMoneySpent.get(k)));
-
         List<EnrichedCampaignRow> cpcRows = new ArrayList<>();
 
         for (CampaignClickStat campaign : runningCampaigns) {
-            String detectedOfferId = extractOfferId(campaign.getTitle());
+            String offerId = extractOfferId(campaign.getTitle());
 
-            OrderReportItem meta = offerIdToMeta.get(detectedOfferId);
-            BigDecimal ordersMoneySpent = offerIdToMoneySpent.getOrDefault(
-                    detectedOfferId, BigDecimal.ZERO);
+            // SKU: приоритет ProductReport (точнее), потом OrderReport
+            String sku = offerId != null
+                    ? offerIdToSkuFromProducts.getOrDefault(
+                    offerId,
+                    offerIdToFirstOrder.containsKey(offerId)
+                            ? offerIdToFirstOrder.get(offerId).getAdvSku()
+                            : null)
+                    : null;
 
-            String advSku = meta != null ? meta.getAdvSku() : null;
-            String title = meta != null ? meta.getTitle() : campaign.getTitle();
-            String offerId = detectedOfferId;
+            // Title: приоритет ProductReport, потом OrderReport, потом название кампании
+            String title = offerId != null
+                    ? offerIdToTitleFromProducts.getOrDefault(
+                    offerId,
+                    offerIdToFirstOrder.containsKey(offerId)
+                            ? offerIdToFirstOrder.get(offerId).getTitle()
+                            : campaign.getTitle())
+                    : campaign.getTitle();
 
-            EnrichedCampaignRow row = EnrichedCampaignRow.builder()
+            BigDecimal moneySpentOrders = offerIdToTotalMoneySpent
+                    .getOrDefault(offerId, BigDecimal.ZERO);
+
+            cpcRows.add(EnrichedCampaignRow.builder()
                     .campaignId(campaign.getId())
                     .campaignTitle(campaign.getTitle())
                     .objectType(campaign.getObjectType())
@@ -94,43 +148,55 @@ public class OzonReportServiceImpl implements OzonReportService {
                     .drr(campaign.getDrr())
                     .toCart(parseIntSafe(campaign.getToCart()))
                     .strategy(campaign.getStrategy())
-                    .advSku(advSku)
+                    .advSku(sku)
                     .offerId(offerId)
                     .title(title)
                     .instrument(INSTRUMENT_CPC)
-                    .moneySpentOrders(ordersMoneySpent)
-                    .build();
+                    .moneySpentOrders(moneySpentOrders)
+                    .build());
 
-            cpcRows.add(row);
+            if (sku == null) {
+                log.warn("SKU не найден: campaignId={} title='{}' offerId='{}'",
+                        campaign.getId(), campaign.getTitle(), offerId);
+            }
         }
 
-        Map<String, List<OrderReportItem>> cpoByOfferId = allOrders.stream()
-                .filter(o -> o.getOrdersSource() != null
-                        && o.getOrdersSource().contains(SOURCE_CPO)
-                        && !o.getOrdersSource().contains(SOURCE_CPC))
-                .collect(Collectors.groupingBy(
-                        OrderReportItem::getOfferId,
-                        LinkedHashMap::new,
-                        Collectors.toList()
-                ));
+        // ============================================================
+        // CPO строки — из заказов где source содержит "Оплата за заказ"
+        // Группируем по offerId
+        // ============================================================
 
-        log.info("CPO групп по offerId: {}", cpoByOfferId.size());
+        // Собираем уникальные offerId с CPO заказами
+        Set<String> cpoOfferIds = offerIdToCpoOrderCount.keySet();
+
+        log.info("CPO товаров (уникальных offerId): {}", cpoOfferIds.size());
 
         List<EnrichedCampaignRow> cpoRows = new ArrayList<>();
 
-        for (Map.Entry<String, List<OrderReportItem>> entry : cpoByOfferId.entrySet()) {
-            String offerId = entry.getKey();
-            List<OrderReportItem> orders = entry.getValue();
-            OrderReportItem first = orders.get(0);
+        for (String offerId : cpoOfferIds) {
+            // SKU и title — строго из ProductReport по offerId
+            String sku = offerIdToSkuFromProducts.get(offerId);
+            String title = offerIdToTitleFromProducts.getOrDefault(
+                    offerId,
+                    offerIdToFirstOrder.containsKey(offerId)
+                            ? offerIdToFirstOrder.get(offerId).getTitle()
+                            : offerId);
 
-            BigDecimal totalMoneySpent = offerIdToMoneySpent.get(offerId);
-
-            BigDecimal totalCost = orders.stream()
-                    .map(o -> nvl(o.getCost()))
+            // Расход CPO = сумма moneySpent ТОЛЬКО CPO заказов данного offerId
+            // (не смешиваем с CPC расходами)
+            BigDecimal cpoCost     = offerIdToCpoCost.getOrDefault(offerId, BigDecimal.ZERO);
+            BigDecimal cpoMoneySpent = allOrders.stream()
+                    .filter(o -> offerId.equals(o.getOfferId())
+                            && o.getOrdersSource() != null
+                            && o.getOrdersSource().contains(SOURCE_CPO)
+                            && !o.getOrdersSource().contains(SOURCE_CPC))
+                    .map(o -> nvl(o.getMoneySpent()))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-            EnrichedCampaignRow row = EnrichedCampaignRow.builder()
-                    .campaignId("-")
+            int ordersCount = offerIdToCpoOrderCount.getOrDefault(offerId, 0);
+
+            cpoRows.add(EnrichedCampaignRow.builder()
+                    .campaignId("-")        // ID CPO кампании нет в данных заказов
                     .campaignTitle("-")
                     .objectType("-")
                     .status("-")
@@ -141,27 +207,33 @@ public class OzonReportServiceImpl implements OzonReportService {
                     .clicks(null)
                     .ctr(null)
                     .clickPrice(null)
-                    .ordersCpc(orders.size())
-                    .ordersMoneyСpc(totalCost)
-                    .drr(calcDrr(totalMoneySpent, totalCost))
+                    .ordersCpc(ordersCount)
+                    .ordersMoneyСpc(cpoCost)
+                    .drr(calcDrr(cpoMoneySpent, cpoCost))
                     .toCart(null)
                     .strategy("-")
-                    .advSku(first.getAdvSku())
+                    .advSku(sku)
                     .offerId(offerId)
-                    .title(first.getTitle())
+                    .title(title)
                     .instrument(INSTRUMENT_CPO)
-                    .moneySpentOrders(totalMoneySpent)
-                    .build();
+                    .moneySpentOrders(cpoMoneySpent)
+                    .build());
 
-            cpoRows.add(row);
+            if (sku == null) {
+                log.warn("CPO: SKU не найден для offerId='{}'", offerId);
+            }
         }
 
+        // ============================================================
+        // Объединяем
+        // ============================================================
         List<EnrichedCampaignRow> result = new ArrayList<>();
         result.addAll(cpcRows);
         result.addAll(cpoRows);
 
-        log.info("Итого строк в отчёте: {} (CPC={}, CPO={})",
-                result.size(), cpcRows.size(), cpoRows.size());
+        long withoutSku = result.stream().filter(r -> r.getAdvSku() == null).count();
+        log.info("Итого строк: {} (CPC={}, CPO={}), без SKU: {}",
+                result.size(), cpcRows.size(), cpoRows.size(), withoutSku);
 
         return result;
     }
