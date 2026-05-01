@@ -6,4 +6,6 @@ import java.util.List;
 
 public interface OzonReportService {
     List<EnrichedCampaignRow> buildReport(String dateFrom, String dateTo, String token);
+    List<EnrichedCampaignRow> buildOrderReport(String dateFrom, String dateTo, String token);
+
 }

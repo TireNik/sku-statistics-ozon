@@ -8,26 +8,31 @@ import java.math.BigDecimal;
 @Data
 @Builder
 public class EnrichedCampaignRow {
-    private String campaignId;
+    private String advSku;
     private String campaignTitle;
-    private String objectType;
-    private String status;
+    private String instrument;
     private String placement;
-    private BigDecimal weeklyBudget;
+    private String campaignId;
+
+    private BigDecimal moneySpentOrders;
     private BigDecimal moneySpentCpc;
+
+    private BigDecimal drr;
+
+    private BigDecimal ordersMoneyСpc;
+    private Integer ordersCpc;
+    private BigDecimal ctr;
     private Integer views;
     private Integer clicks;
-    private BigDecimal ctr;
-    private BigDecimal clickPrice;
-    private Integer ordersCpc;
-    private BigDecimal ordersMoneyСpc;
-    private BigDecimal drr;
     private Integer toCart;
+    private BigDecimal clickPrice;
+
+
+    private String objectType;
+    private String status;
+    private BigDecimal weeklyBudget;
     private String strategy;
 
-    private String advSku;
     private String offerId;
     private String title;
-    private String instrument;
-    private BigDecimal moneySpentOrders;
 }

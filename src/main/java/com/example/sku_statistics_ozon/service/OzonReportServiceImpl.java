@@ -1,6 +1,8 @@
 package com.example.sku_statistics_ozon.service;
 
+import com.example.sku_statistics_ozon.dto.CampaignReportWrapper;
 import com.example.sku_statistics_ozon.dto.EnrichedCampaignRow;
+import com.example.sku_statistics_ozon.dto.ProductStatRow;
 import com.example.sku_statistics_ozon.model.CampaignClickStat;
 import com.example.sku_statistics_ozon.model.OrderReportItem;
 import com.example.sku_statistics_ozon.model.ProductReportItem;
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
@@ -20,235 +23,162 @@ public class OzonReportServiceImpl implements OzonReportService {
 
     private final OzonPerformanceClient client;
 
-    private static final String STATUS_RUNNING = "running";
-    private static final String INSTRUMENT_CPC = "Оплата за клик";
-    private static final String INSTRUMENT_CPO = "Оплата за заказ: выбранные товары";
-    private static final String SOURCE_CPC = "Кампания за клики";
-    private static final String SOURCE_CPO = "Оплата за заказ";
-
     @Override
-    public List<EnrichedCampaignRow> buildReport(String dateFrom, String dateTo, String token) {
+    public List<EnrichedCampaignRow> buildReport(
+            String dateFrom, String dateTo, String token) {
 
-        String postFrom = dateFrom + "T00:00:00Z";
-        String postTo   = dateTo   + "T23:59:59Z";
+        List<CampaignClickStat> campaigns =
+                client.getCampaignProductStats(dateFrom, dateTo, token);
 
-        List<CampaignClickStat> allCampaigns = client.getCampaignProductStats(dateFrom, dateTo, token);
-        List<OrderReportItem>   allOrders    = client.getOrderReport(postFrom, postTo, token);
-        List<ProductReportItem> allProducts  = client.getProductReport(postFrom, postTo, token);
+        log.info("Кампаний получено: {}", campaigns.size());
 
-        log.info("Кампаний: {}, заказов: {}, товаров: {}",
-                allCampaigns.size(), allOrders.size(), allProducts.size());
-
-        Map<String, String> offerIdToSkuFromProducts = allProducts.stream()
-                .filter(p -> p.getOfferId() != null && p.getSku() != null)
-                .collect(Collectors.toMap(
-                        ProductReportItem::getOfferId,
-                        ProductReportItem::getSku,
-                        (a, b) -> a
-                ));
-
-        Map<String, String> offerIdToTitleFromProducts = allProducts.stream()
-                .filter(p -> p.getOfferId() != null && p.getTitle() != null)
-                .collect(Collectors.toMap(
-                        ProductReportItem::getOfferId,
-                        ProductReportItem::getTitle,
-                        (a, b) -> a
-                ));
-
-        log.info("Справочник из ProductReport: {} товаров", offerIdToSkuFromProducts.size());
-
-        Set<String> knownOfferIds = allProducts.stream()
-                .map(ProductReportItem::getOfferId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-
-        log.info("Известных offerId из ProductReport: {}", knownOfferIds.size());
-
-        Map<String, OrderReportItem> offerIdToFirstOrder = new LinkedHashMap<>();
-        Map<String, BigDecimal> offerIdToTotalMoneySpent = new LinkedHashMap<>();
-        Map<String, BigDecimal> offerIdToCpoCost = new LinkedHashMap<>();
-        Map<String, Integer> offerIdToCpoOrderCount = new LinkedHashMap<>();
-
-        for (OrderReportItem order : allOrders) {
-            String offerId = order.getOfferId();
-            if (offerId == null) continue;
-
-            offerIdToFirstOrder.putIfAbsent(offerId, order);
-            offerIdToTotalMoneySpent.merge(offerId, nvl(order.getMoneySpent()), BigDecimal::add);
-
-            boolean isCpo = order.getOrdersSource() != null
-                    && order.getOrdersSource().contains(SOURCE_CPO)
-                    && !order.getOrdersSource().contains(SOURCE_CPC);
-
-            if (isCpo) {
-                offerIdToCpoCost.merge(offerId, nvl(order.getCost()), BigDecimal::add);
-                offerIdToCpoOrderCount.merge(offerId, 1, Integer::sum);
-            }
-        }
-
-        List<CampaignClickStat> runningCampaigns = allCampaigns.stream()
-                .filter(c -> STATUS_RUNNING.equalsIgnoreCase(c.getStatus()))
+        List<CampaignClickStat> skuCampaigns = campaigns.stream()
+                .filter(c -> "SKU".equalsIgnoreCase(c.getObjectType()))
+                .filter(c -> "running".equalsIgnoreCase(c.getStatus()))
                 .toList();
 
-        log.info("Running кампаний: {}", runningCampaigns.size());
+        log.info("SKU кампаний со статусом running: {}", skuCampaigns.size());
+        List<String> campaignIds = skuCampaigns.stream()
+                .map(CampaignClickStat::getId)
+                .toList();
 
-        List<EnrichedCampaignRow> cpcRows = new ArrayList<>();
+        Map<String, CampaignReportWrapper> reports =
+                client.getCampaignReport(campaignIds, dateFrom, dateTo, token);
 
-        for (CampaignClickStat campaign : runningCampaigns) {
-            String offerId = findOfferId(campaign.getTitle(), knownOfferIds);
-            String sku = offerId != null
-                    ? offerIdToSkuFromProducts.getOrDefault(
-                    offerId,
-                    offerIdToFirstOrder.containsKey(offerId)
-                            ? offerIdToFirstOrder.get(offerId).getAdvSku()
-                            : null)
-                    : null;
+        List<EnrichedCampaignRow> result = new ArrayList<>();
 
-            String title = offerId != null
-                    ? offerIdToTitleFromProducts.getOrDefault(
-                    offerId,
-                    offerIdToFirstOrder.containsKey(offerId)
-                            ? offerIdToFirstOrder.get(offerId).getTitle()
-                            : campaign.getTitle())
-                    : campaign.getTitle();
+        for (CampaignClickStat campaign : skuCampaigns) {
 
-            BigDecimal moneySpentOrders = offerIdToTotalMoneySpent
-                    .getOrDefault(offerId, BigDecimal.ZERO);
+            CampaignReportWrapper wrapper = reports.get(campaign.getId());
+            if (wrapper == null || wrapper.getReport() == null) {
+                continue;
+            }
 
-            cpcRows.add(EnrichedCampaignRow.builder()
-                    .campaignId(campaign.getId())
-                    .campaignTitle(campaign.getTitle())
-                    .objectType(campaign.getObjectType())
-                    .status(campaign.getStatus())
-                    .placement(campaign.getPlacement())
-                    .weeklyBudget(nvl(campaign.getWeeklyBudget()))
-                    .moneySpentCpc(nvl(campaign.getMoneySpent()))
-                    .views(parseIntSafe(campaign.getViews()))
-                    .clicks(parseIntSafe(campaign.getClicks()))
-                    .ctr(campaign.getCtr())
-                    .clickPrice(campaign.getClickPrice())
-                    .ordersCpc(parseIntSafe(campaign.getOrders()))
-                    .ordersMoneyСpc(nvl(campaign.getOrdersMoney()))
-                    .drr(campaign.getDrr())
-                    .toCart(parseIntSafe(campaign.getToCart()))
-                    .strategy(campaign.getStrategy())
-                    .advSku(sku)
-                    .offerId(offerId)
-                    .title(title)
-                    .instrument(INSTRUMENT_CPC)
-                    .moneySpentOrders(moneySpentOrders)
-                    .build());
+            List<ProductStatRow> rows = wrapper.getReport().getRows();
 
-            if (sku == null) {
-                log.warn("SKU не найден: campaignId={} title='{}' offerId='{}'",
-                        campaign.getId(), campaign.getTitle(), offerId);
+            if (rows == null || rows.isEmpty()) {
+                rows = List.of(wrapper.getReport().getTotals());
+            }
+
+            for (ProductStatRow row : rows) {
+
+                result.add(EnrichedCampaignRow.builder()
+                        .advSku(row.getSku())
+                        .campaignId(campaign.getId())
+                        .campaignTitle(campaign.getTitle())
+                        .placement(campaign.getPlacement())
+
+                        .moneySpentCpc(nvl(row.getMoneySpent()))
+                        .ordersMoneyСpc(nvl(row.getOrdersMoney()))
+
+                        .ordersCpc(parseInt(row.getOrders()))
+                        .views(parseInt(row.getViews()))
+                        .clicks(parseInt(row.getClicks()))
+                        .toCart(parseInt(row.getToCart()))
+
+                        .ctr(row.getCtr())
+                        .clickPrice(row.getAvgBid())
+
+                        .title(row.getTitle())
+
+                        .objectType(campaign.getObjectType())
+                        .status(campaign.getStatus())
+                        .weeklyBudget(campaign.getWeeklyBudget())
+                        .strategy(campaign.getStrategy())
+
+                        .build());
             }
         }
 
-        Set<String> cpoOfferIds = offerIdToCpoOrderCount.keySet();
+        log.info("Строк после обогащения: {}", result.size());
+        return result;
+    }
+        @Override
+    public List<EnrichedCampaignRow> buildOrderReport(
+            String dateFrom, String dateTo, String token) {
 
-        log.info("CPO товаров (уникальных offerId): {}", cpoOfferIds.size());
+        String postFrom = dateFrom + "T00:00:00Z";
+        String postTo = dateTo + "T00:00:00Z";
 
-        List<EnrichedCampaignRow> cpoRows = new ArrayList<>();
+        List<OrderReportItem> allOrders = client.getOrderReport(postFrom, postTo, token);
+        List<ProductReportItem> allProducts = client.getProductReport(postFrom, postTo, token);
 
-        for (String offerId : cpoOfferIds) {
-            String sku = offerIdToSkuFromProducts.get(offerId);
-            String title = offerIdToTitleFromProducts.getOrDefault(
-                    offerId,
-                    offerIdToFirstOrder.containsKey(offerId)
-                            ? offerIdToFirstOrder.get(offerId).getTitle()
-                            : offerId);
+        log.info("Заказов получено: {}", allOrders.size());
+        log.info("Товаров получены: {}", allProducts.size());
 
-            BigDecimal cpoCost     = offerIdToCpoCost.getOrDefault(offerId, BigDecimal.ZERO);
-            BigDecimal cpoMoneySpent = allOrders.stream()
-                    .filter(o -> offerId.equals(o.getOfferId())
-                            && o.getOrdersSource() != null
-                            && o.getOrdersSource().contains(SOURCE_CPO)
-                            && !o.getOrdersSource().contains(SOURCE_CPC))
+        // Группируем по advSku
+        Map<String, List<OrderReportItem>> byAdvSku = allOrders.stream()
+                .filter(o -> o.getAdvSku() != null)
+                .collect(Collectors.groupingBy(
+                        OrderReportItem::getAdvSku,
+                        LinkedHashMap::new,
+                        Collectors.toList()
+                ));
+
+        Map<String, ProductReportItem> bySku = allProducts.stream()
+                .filter(p -> p.getSku() != null)
+                .collect(Collectors.toMap(
+                        ProductReportItem::getSku,
+                        Function.identity()
+                ));
+
+        log.info("количество с advSku 826917711 {}", byAdvSku.get("826917711").size());
+
+        log.info("Уникальных advSku: {}", byAdvSku.size());
+
+        List<EnrichedCampaignRow> result = new ArrayList<>();
+
+        for (Map.Entry<String, List<OrderReportItem>> entry : byAdvSku.entrySet()) {
+            String advSku = entry.getKey();
+            List<OrderReportItem> orders = entry.getValue();
+            ProductReportItem prod = bySku.get(advSku);
+
+            // Суммируем moneySpent — это расход
+            BigDecimal totalMoneySpent = orders.stream()
                     .map(o -> nvl(o.getMoneySpent()))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-            int ordersCount = offerIdToCpoOrderCount.getOrDefault(offerId, 0);
+            // Суммируем cost — это продажи
+            BigDecimal totalCost = orders.stream()
+                    .map(o -> nvl(o.getCost()))
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-            cpoRows.add(EnrichedCampaignRow.builder()
-                    .campaignId("-")
-                    .campaignTitle("-")
-                    .objectType("-")
-                    .status("-")
-                    .placement("-")
-                    .weeklyBudget(BigDecimal.ZERO)
-                    .moneySpentCpc(BigDecimal.ZERO)
-                    .views(null)
-                    .clicks(null)
-                    .ctr(null)
-                    .clickPrice(null)
-                    .ordersCpc(ordersCount)
-                    .ordersMoneyСpc(cpoCost)
-                    .drr(calcDrr(cpoMoneySpent, cpoCost))
-                    .toCart(null)
-                    .strategy("-")
-                    .advSku(sku)
-                    .offerId(offerId)
-                    .title(title)
-                    .instrument(INSTRUMENT_CPO)
-                    .moneySpentOrders(cpoMoneySpent)
+            // ДРР
+            BigDecimal drr = calcDrr(totalMoneySpent, totalCost);
+
+            // Уникальные источники
+            Set<String> sources = orders.stream()
+                    .map(OrderReportItem::getOrdersSource)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            String ordersSource = sources.size() == 1
+                    ? sources.iterator().next()
+                    : "Смешанный: " + String.join(" + ", sources);
+
+            result.add(EnrichedCampaignRow.builder()
+                            .advSku(advSku)
+                            .campaignTitle(prod.getTitle())
+                            .instrument(ordersSource)
+                            .moneySpentOrders(totalMoneySpent)
+                            .drr(drr)
+                            .ordersMoneyСpc(totalCost)
+                            .ordersMoneyСpc(prod.getOrdersMoney())
+                            .ordersCpc(Integer.valueOf(prod.getOrders()))
                     .build());
-
-            if (sku == null) {
-                log.warn("CPO: SKU не найден для offerId='{}'", offerId);
-            }
         }
 
-        List<EnrichedCampaignRow> result = new ArrayList<>();
-        result.addAll(cpcRows);
-        result.addAll(cpoRows);
-
-        long withoutSku = result.stream().filter(r -> r.getAdvSku() == null).count();
-        log.info("Итого строк: {} (CPC={}, CPO={}), без SKU: {}",
-                result.size(), cpcRows.size(), cpoRows.size(), withoutSku);
-
+        log.info("Строк в отчёте: {}", result.size());
         return result;
     }
 
-    private String findOfferId(String campaignTitle, Set<String> knownOfferIds) {
-        if (campaignTitle == null || campaignTitle.isBlank()) return null;
-
-        String titleUpper = campaignTitle.toUpperCase();
-
-        String firstWord = campaignTitle.trim().split("\\s+")[0];
-        if (knownOfferIds.contains(firstWord)) {
-            return firstWord;
+    private Integer parseInt(String v) {
+        if (v == null || v.isBlank()) return null;
+        try {
+            return Integer.valueOf(v);
+        } catch (Exception e) {
+            return null;
         }
-
-        String[] words = campaignTitle.trim().split("[\\s,.()/\\-]+");
-        List<String> candidates = new ArrayList<>();
-
-        for (String word : words) {
-            if (knownOfferIds.contains(word)) {
-                candidates.add(word);
-            }
-        }
-
-        if (!candidates.isEmpty()) {
-            return candidates.stream()
-                    .max(Comparator.comparingInt(String::length))
-                    .orElse(null);
-        }
-
-        return knownOfferIds.stream()
-                .filter(id -> {
-                    int idx = campaignTitle.indexOf(id);
-                    if (idx < 0) return false;
-                    boolean beforeOk = idx == 0
-                            || !Character.isLetterOrDigit(campaignTitle.charAt(idx - 1));
-                    boolean afterOk  = idx + id.length() >= campaignTitle.length()
-                            || !Character.isLetterOrDigit(campaignTitle.charAt(idx + id.length()));
-                    return beforeOk && afterOk;
-                })
-                .max(Comparator.comparingInt(String::length))
-                .orElse(null);
     }
-
 
     private BigDecimal calcDrr(BigDecimal spent, BigDecimal sales) {
         if (spent == null || sales == null
@@ -262,12 +192,4 @@ public class OzonReportServiceImpl implements OzonReportService {
         return v != null ? v : BigDecimal.ZERO;
     }
 
-    private int parseIntSafe(String value) {
-        if (value == null || value.isBlank()) return 0;
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
 }

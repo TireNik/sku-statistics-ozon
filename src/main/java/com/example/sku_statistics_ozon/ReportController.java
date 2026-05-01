@@ -1,7 +1,6 @@
 package com.example.sku_statistics_ozon;
 
 import com.example.sku_statistics_ozon.dto.EnrichedCampaignRow;
-import com.example.sku_statistics_ozon.dto.ReportCsvRow;
 import com.example.sku_statistics_ozon.service.CsvExportService;
 import com.example.sku_statistics_ozon.service.OzonReportService;
 import lombok.RequiredArgsConstructor;
@@ -22,15 +21,31 @@ public class ReportController {
     private final CsvExportService csvExportService;
 
     @GetMapping(value = "/csv", produces = "text/csv")
-    public ResponseEntity<byte[]> getCsv(
+    public ResponseEntity<byte[]> getCsvClic(
             @RequestParam String dateFrom,  // 2026-04-01
             @RequestParam String dateTo,     // 2026-04-03
             @RequestHeader("X-Ozon-Token") String token
     ) {
-        List<EnrichedCampaignRow> rows = reportService.buildReport(dateFrom, dateTo, token);
+        List<EnrichedCampaignRow> rows = reportService.buildReport(dateFrom, dateTo, token); //написать, реализовать
         byte[] csv = csvExportService.exportToCsv(rows);
 
         String filename = "ozon_report_" + dateFrom + "_" + dateTo + ".csv";
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + filename)
+                .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
+                .body(csv);
+    }
+
+    @GetMapping(value = "/orders/csv", produces = "text/csv")
+    public ResponseEntity<byte[]> getOrdersCsv(
+            @RequestParam String dateFrom,
+            @RequestParam String dateTo,
+            @RequestHeader("X-Ozon-Token") String token
+    ) {
+        List<EnrichedCampaignRow> rows = reportService.buildOrderReport(dateFrom, dateTo, token);
+        byte[] csv = csvExportService.exportToCsv(rows);
+
+        String filename = "ozon_orders_" + dateFrom + "_" + dateTo + ".csv";
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + filename)
                 .header(HttpHeaders.CONTENT_TYPE, "text/csv; charset=UTF-8")
