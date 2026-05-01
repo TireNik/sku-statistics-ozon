@@ -82,7 +82,12 @@ public class CsvExportServiceImpl implements CsvExportService {
     }
 
     private String safe(String v) {
-        return v != null ? v : "-";
+        if (v == null) return "-";
+        return v.replace("\"", "")
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("\t", " ")
+                .trim();
     }
 
     private String formatMoney(BigDecimal v) {

@@ -95,8 +95,7 @@ public class OzonReportServiceImpl implements OzonReportService {
         List<EnrichedCampaignRow> cpcRows = new ArrayList<>();
 
         for (CampaignClickStat campaign : runningCampaigns) {
-            String offerId = extractOfferId(campaign.getTitle());
-
+            String offerId = findOfferId(campaign.getTitle(), knownOfferIds);
             String sku = offerId != null
                     ? offerIdToSkuFromProducts.getOrDefault(
                     offerId,
@@ -211,15 +210,45 @@ public class OzonReportServiceImpl implements OzonReportService {
         return result;
     }
 
-
-    private String extractOfferId(String campaignTitle) {
+    private String findOfferId(String campaignTitle, Set<String> knownOfferIds) {
         if (campaignTitle == null || campaignTitle.isBlank()) return null;
-        String first = campaignTitle.trim().split("\\s+")[0];
-        if (first.matches(".*[\\d-].*")) {
-            return first;
+
+        String titleUpper = campaignTitle.toUpperCase();
+
+        String firstWord = campaignTitle.trim().split("\\s+")[0];
+        if (knownOfferIds.contains(firstWord)) {
+            return firstWord;
         }
-        return null;
+
+        String[] words = campaignTitle.trim().split("[\\s,.()/\\-]+");
+        List<String> candidates = new ArrayList<>();
+
+        for (String word : words) {
+            if (knownOfferIds.contains(word)) {
+                candidates.add(word);
+            }
+        }
+
+        if (!candidates.isEmpty()) {
+            return candidates.stream()
+                    .max(Comparator.comparingInt(String::length))
+                    .orElse(null);
+        }
+
+        return knownOfferIds.stream()
+                .filter(id -> {
+                    int idx = campaignTitle.indexOf(id);
+                    if (idx < 0) return false;
+                    boolean beforeOk = idx == 0
+                            || !Character.isLetterOrDigit(campaignTitle.charAt(idx - 1));
+                    boolean afterOk  = idx + id.length() >= campaignTitle.length()
+                            || !Character.isLetterOrDigit(campaignTitle.charAt(idx + id.length()));
+                    return beforeOk && afterOk;
+                })
+                .max(Comparator.comparingInt(String::length))
+                .orElse(null);
     }
+
 
     private BigDecimal calcDrr(BigDecimal spent, BigDecimal sales) {
         if (spent == null || sales == null

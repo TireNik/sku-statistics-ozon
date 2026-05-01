@@ -16,13 +16,14 @@ public class RuDecimalDeserializer extends StdDeserializer<BigDecimal> {
     }
 
     @Override
-    public BigDecimal deserialize(
-            JsonParser jsonParser,
-            DeserializationContext deserializationContext
-    ) throws IOException, JacksonException {
-        String value = jsonParser.getText();
-        if (value == null || value.isBlank()) return null;
-
-        return new BigDecimal(value.replace(",", "."));
+    public BigDecimal deserialize(JsonParser p, DeserializationContext ctx)
+            throws IOException {
+        String value = p.getText();
+        if (value == null || value.isBlank() || value.equals("-")) return null;
+        try {
+            return new BigDecimal(value.replace(",", ".").trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }
